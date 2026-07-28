@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.lite6_policy as lite6_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -347,6 +348,55 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         model_transforms = ModelTransformFactory()(model_config)
 
         # We return all data transforms for training and inference. No need to change anything here.
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class Lite6Station(DataConfigFactory):
+    """Data config for a custom robot: 6-dim joint-velocity actions and two cameras (base + wrist).
+
+    Copy of the LIBERO data config, adapted for our robot. The main thing to adjust for your own
+    dataset is the ``RepackTransform`` mapping below: map your LeRobot dataset's column names onto
+    the canonical keys that ``Lite6Inputs`` reads.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # The repack transform remaps your dataset's raw column names to the keys that
+        # ``Lite6Inputs`` expects. The right-hand side values are your dataset's actual keys --
+        # UPDATE THEM to match the columns in your LeRobot dataset.
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.base",  # <- your base cam column
+                        "observation/wrist_image": "observation.images.wrist",  # <- your wrist cam column
+                        "observation/state": "observation.state",  # <- your 6-dim state column
+                        "actions": "action",  # <- your 6-dim joint-velocity action column
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Data transforms are applied during training *and* inference.
+        data_transforms = _transforms.Group(
+            inputs=[lite6_policy.Lite6Inputs(model_type=model_config.model_type)],
+            outputs=[lite6_policy.Lite6Outputs()],
+        )
+
+        # Note: actions are joint *velocities*, which are already relative, so we do NOT apply a
+        # delta transform (unlike absolute joint-position setups such as DROID JOINT_POSITION).
+
+        # Model transforms handle tokenization, image resizing, and state/action padding to the
+        # model action dim. Nothing to change here.
+        model_transforms = ModelTransformFactory()(model_config)
+
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
@@ -760,6 +810,31 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    #
+    # Fine-tuning custom robot config (pi0.5, 6-dim joint velocity, 2 cameras).
+    #
+    TrainConfig(
+        name="lite6_station",
+        # Full finetune of pi0.5 base. Keep action_dim=32 to match the pretrained checkpoint --
+        # our 6-dim state/actions are zero-padded to 32 automatically and sliced back in Lite6Outputs.
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,  # predicted action chunk length -- tune to your control frequency.
+        ),
+        data=Lite6Station(
+            # Replace with your converted LeRobot dataset repo id (HF Hub id or local repo id).
+            repo_id="lite6/station",
+            # prompt_from_task pulls the language instruction from the LeRobot ``task`` field.
+            # If your dataset has no task, remove this and add ``default_prompt`` handling instead.
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        # Load the pi0.5 base checkpoint. Fresh norm stats are computed for this config
+        # (custom robot does not match any provided asset_id), so no AssetsConfig override.
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,  # increase if GPU memory allows.
     ),
     #
     # Fine-tuning Aloha configs.
