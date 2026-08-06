@@ -21,6 +21,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.lite6_policy as lite6_policy
+import openpi.policies.humanoid_navigate_policy as humanoid_navigate_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -395,6 +396,41 @@ class Lite6Station(DataConfigFactory):
 
         # Model transforms handle tokenization, image resizing, and state/action padding to the
         # model action dim. Nothing to change here.
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class HumanoidNavigate(DataConfigFactory):
+    """Data config for Humanoid Navigate dataset: 6-dim action vector [x, z, u, w, vel, curvature]
+    and base camera image.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.image",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[humanoid_navigate_policy.HumanoidNavigateInputs(model_type=model_config.model_type)],
+            outputs=[humanoid_navigate_policy.HumanoidNavigateOutputs()],
+        )
+
         model_transforms = ModelTransformFactory()(model_config)
 
         return dataclasses.replace(
@@ -835,6 +871,24 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
         batch_size=32,  # increase if GPU memory allows.
+    ),
+    #
+    # Fine-tuning Humanoid Navigate config (pi0.5, 6-dim action, 1 camera, action_horizon=1).
+    #
+    TrainConfig(
+        name="humanoid_navigate",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=1,
+        ),
+        data=HumanoidNavigate(
+            repo_id="simnav/vla_dataset",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
     ),
     #
     # Fine-tuning Aloha configs.
